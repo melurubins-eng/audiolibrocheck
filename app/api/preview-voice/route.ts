@@ -27,7 +27,7 @@ export async function POST(request: NextRequest) {
       pitch,
     })
 
-    return new Response(buffer, {
+    return new Response(new Uint8Array(buffer), {
       headers: {
         'Content-Type': 'audio/mpeg',
         'Content-Length': String(buffer.length),
