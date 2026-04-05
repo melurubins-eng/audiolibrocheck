@@ -1,12 +1,13 @@
 'use client'
 
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useRef } from 'react'
 import { BookOpen, AlertCircle, Loader2 } from 'lucide-react'
 import FileUpload from '@/components/FileUpload'
 import TextPreview from '@/components/TextPreview'
 import VoiceConfig from '@/components/VoiceConfig'
 import AudioPlayer from '@/components/AudioPlayer'
-import type { AppStep, ExtractedDocument, ConversionConfig, SSEEvent } from '@/types'
+import { chunkText, cleanText } from '@/lib/text-chunker'
+import type { AppStep, ExtractedDocument, ConversionConfig } from '@/types'
 
 interface ConversionState {
   current: number
@@ -19,7 +20,8 @@ export default function Home() {
   const [doc, setDoc] = useState<ExtractedDocument | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [conversion, setConversion] = useState<ConversionState>({ current: 0, total: 0 })
-  const [jobId, setJobId] = useState<string | null>(null)
+  const [audioUrl, setAudioUrl] = useState<string | null>(null)
+  const abortRef = useRef<AbortController | null>(null)
 
   // ── Handlers ──────────────────────────────────────────────────────────────
 
@@ -48,76 +50,75 @@ export default function Home() {
   const handleConvert = useCallback(async (config: ConversionConfig) => {
     if (!doc) return
     setError(null)
-    setConversion({ current: 0, total: 0 })
     setStep('converting')
 
+    // Clean + chunk text on the client
+    const maxChars = parseInt(process.env.NEXT_PUBLIC_MAX_CHARS ?? '200000', 10)
+    const safeText = doc.text.length > maxChars ? doc.text.slice(0, maxChars) : doc.text
+    const chunks = chunkText(safeText)
+
+    setConversion({ current: 0, total: chunks.length })
+
+    const abortController = new AbortController()
+    abortRef.current = abortController
+
     try {
-      const res = await fetch('/api/convert-audio', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text: doc.text,
-          voiceId: config.voiceId,
-          speakingRate: config.speakingRate,
-          pitch: config.pitch,
-        }),
-      })
+      const audioBlobs: Blob[] = []
 
-      if (!res.body) throw new Error('Sin respuesta del servidor.')
+      for (let i = 0; i < chunks.length; i++) {
+        if (abortController.signal.aborted) break
 
-      // Read SSE stream
-      const reader = res.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
+        setConversion({ current: i + 1, total: chunks.length })
 
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
+        const res = await fetch('/api/convert-chunk', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: chunks[i],
+            voiceId: config.voiceId,
+            speakingRate: config.speakingRate,
+            pitch: config.pitch,
+          }),
+          signal: abortController.signal,
+        })
 
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() ?? ''  // Keep incomplete line in buffer
-
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue
-          let event: SSEEvent
-          try {
-            event = JSON.parse(line.slice(6)) as SSEEvent
-          } catch {
-            continue
-          }
-
-          if (event.type === 'start') {
-            setConversion({ current: 0, total: event.totalChunks })
-          } else if (event.type === 'progress') {
-            setConversion({ current: event.current, total: event.total })
-          } else if (event.type === 'complete') {
-            setJobId(event.jobId)
-            setStep('done')
-          } else if (event.type === 'error') {
-            throw new Error(event.message)
-          }
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ error: `Error ${res.status}` }))
+          throw new Error(err.error ?? `Error al procesar fragmento ${i + 1}`)
         }
+
+        const blob = await res.blob()
+        audioBlobs.push(blob)
       }
+
+      // Concatenate all audio blobs client-side
+      const fullBlob = new Blob(audioBlobs, { type: 'audio/mpeg' })
+      const url = URL.createObjectURL(fullBlob)
+      setAudioUrl(url)
+      setStep('done')
     } catch (err) {
+      if (abortController.signal.aborted) return
       setError(err instanceof Error ? err.message : 'Error inesperado al convertir.')
       setStep('error')
+    } finally {
+      abortRef.current = null
     }
   }, [doc])
 
   const reset = useCallback(() => {
+    // Abort any in-progress conversion
+    abortRef.current?.abort()
+    // Revoke old audio URL
+    if (audioUrl) URL.revokeObjectURL(audioUrl)
     setStep('upload')
     setDoc(null)
     setFilename('')
     setError(null)
-    setJobId(null)
+    setAudioUrl(null)
     setConversion({ current: 0, total: 0 })
-  }, [])
+  }, [audioUrl])
 
   // ── Render ────────────────────────────────────────────────────────────────
-
-  const audioUrl     = jobId ? `/api/audio/${jobId}` : ''
-  const downloadUrl  = jobId ? `/api/audio/${jobId}?download=true` : ''
 
   return (
     <main className="min-h-screen flex flex-col items-center justify-start py-12 px-4">
@@ -140,12 +141,10 @@ export default function Home() {
       {/* Main card */}
       <div className="w-full max-w-2xl bg-white rounded-2xl shadow-xl border border-slate-100 p-8 mt-6">
 
-        {/* UPLOAD */}
         {step === 'upload' && (
           <FileUpload onFileSelected={handleFileSelected} />
         )}
 
-        {/* EXTRACTING */}
         {step === 'extracting' && (
           <div className="flex flex-col items-center gap-4 py-12">
             <Loader2 className="w-10 h-10 text-brand-500 animate-spin" />
@@ -154,7 +153,6 @@ export default function Home() {
           </div>
         )}
 
-        {/* PREVIEW */}
         {step === 'preview' && doc && (
           <TextPreview
             doc={doc}
@@ -164,7 +162,6 @@ export default function Home() {
           />
         )}
 
-        {/* CONFIGURE */}
         {step === 'configure' && (
           <VoiceConfig
             onConvert={handleConvert}
@@ -172,28 +169,24 @@ export default function Home() {
           />
         )}
 
-        {/* CONVERTING */}
         {step === 'converting' && (
           <ConvertingView conversion={conversion} />
         )}
 
-        {/* DONE */}
-        {step === 'done' && jobId && (
+        {step === 'done' && audioUrl && (
           <AudioPlayer
             audioUrl={audioUrl}
-            downloadUrl={downloadUrl}
+            downloadUrl={audioUrl}
             filename={filename.replace('.pdf', '.mp3')}
             onReset={reset}
           />
         )}
 
-        {/* ERROR */}
         {step === 'error' && (
           <ErrorView message={error ?? 'Ocurrió un error inesperado.'} onReset={reset} />
         )}
       </div>
 
-      {/* Footer */}
       <footer className="mt-8 text-xs text-slate-400 text-center">
         Powered by Microsoft Edge Neural TTS · Next.js
       </footer>
@@ -271,8 +264,8 @@ function ConvertingView({ conversion }: { conversion: ConversionState }) {
         </div>
 
         <p className="text-xs text-slate-400 text-center">
-          Los PDFs largos se procesan en fragmentos para garantizar calidad de audio.
-          Esto puede tomar varios minutos.
+          Cada fragmento se convierte individualmente.
+          {total > 5 && ' Esto puede tomar varios minutos para PDFs largos.'}
         </p>
       </div>
     </div>

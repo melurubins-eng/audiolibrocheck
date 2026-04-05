@@ -178,7 +178,7 @@ export default function AudioPlayer({ audioUrl, filename, downloadUrl, onReset }
       <div className="flex gap-3">
         <a
           href={downloadUrl}
-          download
+          download={filename ?? 'audiolibro.mp3'}
           className="flex-1 flex items-center justify-center gap-2 py-3 bg-brand-600 hover:bg-brand-700 text-white font-semibold rounded-xl transition-colors"
         >
           <Download className="w-4 h-4" />
