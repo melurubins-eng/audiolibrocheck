@@ -1,0 +1,25 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  }
+
+  body {
+    @apply bg-gradient-to-br from-slate-100 to-brand-50 min-h-screen;
+  }
+}
+
+@layer utilities {
+  /* Custom range input styling (cross-browser) */
+  input[type='range']::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+  }
+  input[type='range']::-moz-range-thumb {
+    border: none;
+    appearance: none;
+  }
+}
