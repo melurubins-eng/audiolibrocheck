@@ -19,7 +19,7 @@ export function GET(
 
   const isDownload = request.nextUrl.searchParams.get('download') === 'true'
 
-  return new Response(entry.buffer, {
+  return new Response(new Uint8Array(entry.buffer), {
     headers: {
       'Content-Type': 'audio/mpeg',
       'Content-Length': String(entry.buffer.length),
